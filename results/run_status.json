@@ -1,0 +1,29 @@
+{
+  "status": "EVALUATED",
+  "split": "test",
+  "metrics": {
+    "ndcg_at_5": 0.6231508934184055,
+    "recall_at_5": 0.7027385075417778,
+    "examples": 158517
+  },
+  "evaluated_checkpoint": "/kaggle/working/MLEUP_Trivago_EventGraphCandidate_18Metadata_Work_v2/context_price_v1/run_relative_price_v1/result_best.pth",
+  "selection_metric": "ndcg_at_5",
+  "best_epoch": 4,
+  "best_val_ndcg_at_5": 0.6236397602064222,
+  "training_finished": true,
+  "early_stopping": {
+    "version": "val_ndcg_delta_or_ce_divergence_v3",
+    "patience": 3,
+    "loss_patience": 3,
+    "min_delta": 0.0001,
+    "loss_min_delta": 0.001,
+    "ndcg_anchor": 0.623584563295339,
+    "ndcg_bad_epochs": 2,
+    "loss_bad_epochs": 2,
+    "previous_train_ce": 1.8332422394536756,
+    "previous_val_ce": 2.1635627763502363,
+    "stopped": false,
+    "reason": null,
+    "triggered": []
+  }
+}

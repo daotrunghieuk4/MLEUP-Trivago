@@ -1,0 +1,15 @@
+
+COMMAND: /usr/bin/python3 -u /kaggle/working/MLEUP_Trivago_EventGraphCandidate_18Metadata_Work_v2/context_price_v1/code/train_trivago_top5.py --prepared-dir /kaggle/working/MLEUP_Trivago_EventGraphCandidate_18Metadata_Work_v2/context_price_v1/prepared_context_price_v1 --output-dir /kaggle/working/MLEUP_Trivago_EventGraphCandidate_18Metadata_Work_v2/context_price_v1/run_relative_price_v1 --epochs 5 --patience 3 --loss-patience 3 --loss-min-delta 0.001 --lr 0.001 --lr-factor 0.5 --lr-patience 1 --min-lr 1e-05 --min-delta 0.0001 --batch-size 256 --emb-size 16 --num-heads 4 --metadata-projection fieldwise --action-mode event_graph_candidate --price-mode relative_mlp_v1 --eval-only test
+Loaded /kaggle/working/MLEUP_Trivago_EventGraphCandidate_18Metadata_Work_v2/context_price_v1/run_relative_price_v1/result_best.pth; epoch=4, offset=0
+Device=cuda; hotels=927,142; fields=18; projection=fieldwise; action_mode=event_graph_candidate; num_actions=12; event_tokens=0; encoder=item_action_session_graph_v1; fusion=candidate_conditioned_event_readout_v1; metadata_reduction=valid_pair_mean_v1; candidate_policy=unique_item_first_impression_v1; patience=3; loss_patience=3; min_delta=0.0001; loss_min_delta=0.001; scheduler=ReduceLROnPlateau; lr_factor=0.5; lr_patience=1; min_lr=1e-05; data_schema=3; action_history_policy=train_clickouts_appended; val_test_clickouts_masked
+  eval: 0/158,517
+  eval: 128,000/158,517
+{
+  "test": {
+    "ndcg_at_5": 0.6231508934184055,
+    "recall_at_5": 0.7027385075417778,
+    "examples": 158517
+  }
+}
+
+RETURN_CODE=0
