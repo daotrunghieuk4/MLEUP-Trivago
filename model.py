@@ -77,6 +77,8 @@ class MLEUP(Module):
         self.valid_groups_only = getattr(opt, 'valid_groups_only', False)
         self.action_mode = getattr(opt, 'action_mode', 'none')
         self.price_mode = getattr(opt, 'price_mode', 'off')
+        if not self.n_feature and (self.action_mode != 'none' or self.price_mode != 'off' or opt.beta):
+            raise ValueError('Metadata-free runs require action=none, price=off and beta=0')
         if self.price_mode not in ('off', 'relative_mlp_v1'):
             raise ValueError(f'Unsupported price_mode: {self.price_mode!r}')
         if self.price_mode != 'off' and self.action_mode != 'event_graph_candidate':
@@ -142,7 +144,8 @@ class MLEUP(Module):
             fm = FL(num, self.emb_size, self.n_node)
             self.add_module('feature_model_{}'.format(i), fm)
             self.all_feature_model.append(fm)
-        self.W1_feature = nn.Linear(self.emb_size * self.n_feature, self.emb_size)
+        self.W1_feature = (nn.Linear(self.emb_size * self.n_feature, self.emb_size)
+                           if self.n_feature else None)
         self.query = nn.Linear(self.emb_size , self.emb_size)
         self.key = nn.Linear(self.emb_size , self.emb_size)
         self.value = nn.Linear(self.emb_size , self.emb_size)
@@ -374,31 +377,12 @@ class MLEUP(Module):
             result = result + self.W1_feature.bias
         return result
 
-    def forward(self, alias_re_inputs, items, mask, re_inputs, re_groups, re_neg_groups, mask_groups, edge_nodes_co, edge_weight_co, node_edges_co, f_adjacency_nodes_seq, f_adjacency_weight_seq, b_adjacency_nodes_seq, b_adjacency_weight_seq, re_actions=None, event_tokens=None, event_mask=None, candidates=None, candidate_mask=None, price_features=None):
-        batch_size = mask.shape[0]
-        max_len = mask.shape[1]
-        if self.action_mode in ('item_event', 'event_graph_candidate'):
-            if re_actions is None:
-                raise ValueError(f'{self.action_mode} mode requires re_actions')
-            if re_actions.shape != mask.shape:
-                raise ValueError('re_actions must have the same [B,L] shape as mask')
-        elif re_actions is not None:
-            raise ValueError('re_actions supplied outside an action-aware mode')
-        if self.action_mode == 'event_graph_candidate':
-            if candidates is None or candidate_mask is None:
-                raise ValueError('event_graph_candidate requires padded candidate IDs and a mask')
-            if candidates.shape != candidate_mask.shape or candidates.shape[0] != batch_size:
-                raise ValueError('Candidates and candidate mask must have aligned [B,C] shapes')
-        elif candidates is not None or candidate_mask is not None:
-            raise ValueError('Candidates supplied outside event_graph_candidate mode')
-        if self.action_mode != 'all_event' and (event_tokens is not None or event_mask is not None):
-            raise ValueError('Event tokens supplied outside all_event mode')
-        if self.action_mode == 'all_event' and (event_tokens is None or event_tokens.shape[0] != batch_size):
-            raise ValueError('Event histories must align with the item batch')
-        zeros = self.embedding_i.weight.new_zeros((1, self.emb_size))
-        sample_order = self.sample_order
-
-        embedding_i = torch.cat([zeros, self.embedding_i.weight], 0)
+    def encode_attributes(self, embedding_i, zeros, re_inputs, mask, re_groups,
+                          re_neg_groups, mask_groups, max_len, batch_size):
+        if not self.n_feature:
+            return (None, embedding_i.new_zeros((batch_size, max_len, self.emb_size)),
+                    embedding_i.new_zeros((batch_size, self.emb_size)), None,
+                    embedding_i.new_zeros(()))
         # Attribute embedding learning
         # (1) Modeling global attribute-item relationship   (2) Concatenating multiple attribute values of an item
         if self.metadata_projection == 'fieldwise':
@@ -456,6 +440,38 @@ class MLEUP(Module):
             # Match CE's mean reduction. Padding and missing neighbor pairs
             # must not dilute the loss or change beta when batch size changes.
             s_loss = s_loss / valid_pair_count.clamp_min(1)
+
+        return embedding_f, final_embedding_f, sess_embedding_f, current_stable_available, s_loss
+
+    def forward(self, alias_re_inputs, items, mask, re_inputs, re_groups, re_neg_groups, mask_groups, edge_nodes_co, edge_weight_co, node_edges_co, f_adjacency_nodes_seq, f_adjacency_weight_seq, b_adjacency_nodes_seq, b_adjacency_weight_seq, re_actions=None, event_tokens=None, event_mask=None, candidates=None, candidate_mask=None, price_features=None):
+        batch_size = mask.shape[0]
+        max_len = mask.shape[1]
+        if self.action_mode in ('item_event', 'event_graph_candidate'):
+            if re_actions is None:
+                raise ValueError(f'{self.action_mode} mode requires re_actions')
+            if re_actions.shape != mask.shape:
+                raise ValueError('re_actions must have the same [B,L] shape as mask')
+        elif re_actions is not None:
+            raise ValueError('re_actions supplied outside an action-aware mode')
+        if self.action_mode == 'event_graph_candidate':
+            if candidates is None or candidate_mask is None:
+                raise ValueError('event_graph_candidate requires padded candidate IDs and a mask')
+            if candidates.shape != candidate_mask.shape or candidates.shape[0] != batch_size:
+                raise ValueError('Candidates and candidate mask must have aligned [B,C] shapes')
+        elif candidates is not None or candidate_mask is not None:
+            raise ValueError('Candidates supplied outside event_graph_candidate mode')
+        if self.action_mode != 'all_event' and (event_tokens is not None or event_mask is not None):
+            raise ValueError('Event tokens supplied outside all_event mode')
+        if self.action_mode == 'all_event' and (event_tokens is None or event_tokens.shape[0] != batch_size):
+            raise ValueError('Event histories must align with the item batch')
+        zeros = self.embedding_i.weight.new_zeros((1, self.emb_size))
+        sample_order = self.sample_order
+
+        embedding_i = torch.cat([zeros, self.embedding_i.weight], 0)
+        embedding_f, final_embedding_f, sess_embedding_f, current_stable_available, s_loss = (
+            self.encode_attributes(embedding_i, zeros, re_inputs, mask, re_groups,
+                                   re_neg_groups, mask_groups, max_len, batch_size)
+        )
 
         # Item embedding learning
         tar_embedding_i = embedding_i[items]
@@ -555,6 +571,9 @@ class MLEUP(Module):
                                            torch.zeros_like(sess_embedding_i))
         elif self.action_mode in ('item_event', 'event_graph_candidate'):
             current_dynamic_available = mask.bool().any(dim=1)
+
+        if not self.n_feature:
+            return sess_embedding_i @ embedding_i.T, s_loss
 
         # User preferences fusion
         sess_embedding_f = self.dropout20(self.LN(sess_embedding_f))

@@ -1,5 +1,28 @@
 # MLEUP Trivago
 
+## Chạy nhanh trên Databricks với lượt ghé địa điểm
+
+Notebook [`databricks_mleup.py`](databricks_mleup.py) dùng bảng có thứ tự lượt ghé theo người dùng hoặc phiên để dự đoán **địa điểm ghé tiếp theo**. Nó sử dụng phần học chuỗi và đồ thị của MLEUP, khởi tạo trọng số mới và tắt hai nhánh hành động, giá cùng nhánh metadata. Phần chạy thử chỉ cần ba cột trong bảng hiện có.
+
+1. Trong Databricks, tạo **Git Folder** từ URL repo và chuyển sang nhánh `databricks-quickstart`. Repo private cần tài khoản Git có quyền đọc. [Cách clone bằng Git Folder](https://docs.databricks.com/aws/en/repos/git-operations-with-repos)
+2. Mở notebook `databricks_mleup` và gắn compute dùng **Databricks Runtime ML** có Python, pandas và PyTorch. CPU đủ cho lần thử nhỏ. Chạy cell cấu hình để tạo các widget.
+3. Điền các giá trị dưới đây rồi chọn **Run all**.
+
+| Widget | Giá trị |
+| --- | --- |
+| `table` | Tên bảng hoặc view mà compute đọc được, ví dụ `catalog.schema.visits` |
+| `sequence_col` | Cột ID người dùng nếu dự báo theo lịch sử người dùng, hoặc ID phiên duy nhất nếu dự báo trong phiên |
+| `destination_col` | ID địa điểm **đã ghé**. Giữ cột nơi xuất phát riêng nếu dữ liệu cũng có cột đó |
+| `time_col` | Thời gian lượt ghé dạng timestamp hoặc chuỗi ngày giờ ISO. Với thời gian Unix dạng số, chuyển sang timestamp trong view trước |
+| `validation_start`, `test_start` | Hai mốc UTC theo thứ tự, ví dụ `2025-09-01` và `2025-10-01`. Chọn mốc nằm trong khoảng dữ liệu của bạn |
+| `epochs`, `batch_size` | Mặc định thử 2 epoch, 32 mẫu mỗi batch |
+| `max_rows` | Mặc định 10.000 dòng. Với bảng lớn, tạo view thử gồm một tập ID và giữ đầy đủ lịch sử của các ID đó |
+| `output_dir` | Để trống cho thư mục tạm trên driver, hoặc nhập một thư mục mới trong `/Volumes/…` để lưu lâu dài |
+
+Notebook lấy tối đa 20 lượt ghé trước mỗi mục tiêu, chia theo thời điểm của mục tiêu và dựng tập địa điểm từ train. Kết quả gồm `metrics.json` với Recall@5, NDCG@5, số mẫu và số lượt nằm ngoài danh mục train. Checkpoint được chọn theo NDCG@5 validation và lưu dưới tên `mleup_visits.pt`. Bảng và checkpoint chứa ID chỉ được xử lý trong Databricks.
+
+**Điều kiện dữ liệu.** Cần ít nhất hai địa điểm đích trong train, có các lượt ghé nối tiếp theo từng ID và có mẫu hợp lệ ở cả ba tập. Nếu mọi dòng đều đến cùng một nơi, dữ liệu phù hợp với bài toán đếm hoặc dự báo lượt đến theo nguồn. Nếu nhiều địa điểm chia sẻ cùng timestamp trong một chuỗi, hãy chuẩn hóa thứ tự sự kiện trước khi chạy. Bản thử xử lý trên một driver và xếp hạng trên danh mục đã thấy trong train.
+
 Hệ thống gợi ý khách sạn theo phiên tương tác trên dữ liệu Trivago RecSys Challenge 2019. Mô hình xếp hạng các khách sạn trong danh sách impressions để dự đoán clickout tiếp theo và trả về Top 5.
 
 Phiên bản này phát triển từ MLEUP, kết hợp 18 trường metadata, đồ thị sự kiện với attention phụ thuộc ứng viên và 9 đặc trưng giá tương đối.
