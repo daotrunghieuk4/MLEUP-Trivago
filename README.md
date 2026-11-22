@@ -92,13 +92,13 @@ Trên Linux dùng `sha256sum data/raw/train.csv data/raw/item_metadata.csv`. Tr�
 
 ### Dùng bộ CSV chia phần trên Databricks
 
-Từ thư mục gốc repo, đóng gói hai CSV đã giải nén vào thư mục mới. Mỗi phần mặc định tối đa 90 MiB để dùng Git thường trên GitHub.
+Nhánh `main` lưu bộ CSV dưới dạng các phần nén trong `data_parts/`. Clone repo bằng **Create Git Folder**, mở `databricks_mleup_ablation.py` ở thư mục gốc và chạy cell cấu hình trước. Notebook kiểm tra SHA-256 từng phần, khôi phục hai CSV vào đĩa tạm rồi chạy pipeline cũ. Dữ liệu đã xử lý và checkpoint trên đĩa tạm có thể mất khi compute dừng.
+
+Để đóng gói lại từ hai CSV đã giải nén, chạy ở thư mục gốc repo. Mỗi phần mặc định tối đa 90 MiB để dùng Git thường trên GitHub.
 
 ```bash
 python trivago_data_parts.py data/raw artifacts/trivago_git_parts
 ```
-
-Khi dữ liệu được phép phân phối qua Git, đặt toàn bộ nội dung của `artifacts/trivago_git_parts` vào `data_parts/` của Git Folder, gồm `manifest.json` và tất cả `trivago.part*`. Mở `databricks_mleup_ablation.py` ở thư mục gốc và chạy cell cấu hình trước. Notebook kiểm tra SHA-256 từng phần, khôi phục hai CSV vào đĩa tạm rồi chạy pipeline cũ. Dữ liệu đã xử lý và checkpoint trên đĩa tạm có thể mất khi compute dừng.
 
 Nếu Git Folder không có `data_parts/`, notebook dùng `RAW_DIR` và `EXPERIMENT_DIR` như trước.
 
