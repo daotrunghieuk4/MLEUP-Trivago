@@ -90,6 +90,18 @@ Get-FileHash data/raw/train.csv, data/raw/item_metadata.csv -Algorithm SHA256
 
 Trên Linux dùng `sha256sum data/raw/train.csv data/raw/item_metadata.csv`. Trên macOS dùng `shasum -a 256 data/raw/train.csv data/raw/item_metadata.csv`. Checksum khác có thể phản ánh khác biệt phiên bản hoặc nội dung tệp, cần kiểm tra trước khi đối chiếu kết quả thí nghiệm.
 
+### Dùng bộ CSV chia phần trên Databricks
+
+Từ thư mục gốc repo, đóng gói hai CSV đã giải nén vào thư mục mới. Mỗi phần mặc định tối đa 90 MiB để dùng Git thường trên GitHub.
+
+```bash
+python trivago_data_parts.py data/raw artifacts/trivago_git_parts
+```
+
+Khi dữ liệu được phép phân phối qua Git, đặt toàn bộ nội dung của `artifacts/trivago_git_parts` vào `data_parts/` của Git Folder, gồm `manifest.json` và tất cả `trivago.part*`. Mở `databricks_mleup_ablation.py` ở thư mục gốc và chạy cell cấu hình trước. Notebook kiểm tra SHA-256 từng phần, khôi phục hai CSV vào đĩa tạm rồi chạy pipeline cũ. Dữ liệu đã xử lý và checkpoint trên đĩa tạm có thể mất khi compute dừng.
+
+Nếu Git Folder không có `data_parts/`, notebook dùng `RAW_DIR` và `EXPERIMENT_DIR` như trước.
+
 ## Chuẩn bị dữ liệu
 
 Đặt hai tệp dữ liệu Trivago tại `data/raw/train.csv` và `data/raw/item_metadata.csv`. Các cột sự kiện được sử dụng gồm user/session, timestamp, action, reference, impressions và prices. Preprocessor kiểm tra schema khi đọc dữ liệu.

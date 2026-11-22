@@ -4,6 +4,8 @@
 # MAGIC Đặt notebook tại thư mục gốc Git Folder `MLEUP-Trivago`, trên compute có `numpy` và `torch`.
 # MAGIC Chỉnh đường dẫn CSV và Volume lưu kết quả ở cell dưới. Dùng cùng seed, batch size,
 # MAGIC số epoch tối đa và cách chọn checkpoint theo NDCG@5 trên validation cho cả bốn lượt.
+# MAGIC Nếu có `data_parts/manifest.json` cạnh notebook, cell cấu hình tự ghép các phần,
+# MAGIC kiểm tra SHA-256 và giải nén dữ liệu vào đĩa tạm. Kết quả ở đó có thể mất khi compute dừng.
 # MAGIC Sau cell chuẩn bị dữ liệu, chạy từng cell train hoặc chọn **Run All**. Mỗi cell
 # MAGIC in tiến độ theo epoch và kết quả test khi hoàn tất. Cell cuối tổng hợp kết quả.
 # MAGIC
@@ -23,6 +25,8 @@ from pathlib import Path
 
 import torch
 
+from trivago_data_parts import CSV_NAMES, unpack
+
 RAW_DIR = Path("/Volumes/<catalog>/<schema>/<volume>/raw")
 EXPERIMENT_DIR = RAW_DIR.parent / "ablation_v1"
 EPOCHS = 50
@@ -32,13 +36,20 @@ SEED = 2023
 PATIENCE = 5
 MIN_DELTA = 0.0001
 LOSS_PATIENCE = 50
-RUNS_DIR = EXPERIMENT_DIR / f"runs_e{EPOCHS}_b{BATCH_SIZE}"
 
 repo = Path.cwd()
 scratch = Path(tempfile.mkdtemp(prefix="mleup_ablation_"))
 if not (repo / "train_trivago_top5.py").is_file():
     raise FileNotFoundError("Đặt notebook tại thư mục gốc MLEUP-Trivago.")
-for name in ("train.csv", "item_metadata.csv"):
+parts_dir = repo / "data_parts"
+if parts_dir.is_dir():
+    RAW_DIR = scratch / "raw"
+    EXPERIMENT_DIR = scratch / "ablation_v1"
+    print(f"Đang khôi phục CSV từ {parts_dir}", flush=True)
+    unpack(parts_dir, RAW_DIR)
+RUNS_DIR = EXPERIMENT_DIR / f"runs_e{EPOCHS}_b{BATCH_SIZE}"
+
+for name in CSV_NAMES:
     if not (RAW_DIR / name).is_file():
         raise FileNotFoundError(RAW_DIR / name)
 print(f"PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()}")
