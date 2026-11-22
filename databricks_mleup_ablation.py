@@ -25,9 +25,13 @@ import torch
 
 RAW_DIR = Path("/Volumes/<catalog>/<schema>/<volume>/raw")
 EXPERIMENT_DIR = RAW_DIR.parent / "ablation_v1"
-EPOCHS = 1
-BATCH_SIZE = 32
+EPOCHS = 50
+BATCH_SIZE = 128
 SEED = 2023
+
+PATIENCE = 5
+MIN_DELTA = 0.0001
+LOSS_PATIENCE = 50
 RUNS_DIR = EXPERIMENT_DIR / f"runs_e{EPOCHS}_b{BATCH_SIZE}"
 
 repo = Path.cwd()
@@ -102,9 +106,23 @@ def train_and_evaluate(name, fields, action_mode, price_mode):
     status_path = output / "run_status.json"
     command = [
         "train_trivago_top5.py",
-        "--prepared-dir", str(prepared[fields]), "--output-dir", str(output),
-        "--epochs", str(EPOCHS), "--batch-size", str(BATCH_SIZE),
-        "--metadata-projection", "fieldwise", "--action-mode", action_mode,
+        "--prepared-dir", str(prepared[fields]),
+        "--output-dir", str(output),
+
+        "--epochs", str(EPOCHS),
+        "--batch-size", str(BATCH_SIZE),
+
+        "--patience", str(PATIENCE),
+        "--min-delta", str(MIN_DELTA),
+        "--loss-patience", str(LOSS_PATIENCE),
+
+        "--lr", "0.001",
+        "--lr-factor", "0.5",
+        "--lr-patience", "1",
+        "--min-lr", "0.00001",
+
+        "--metadata-projection", "fieldwise",
+        "--action-mode", action_mode,
         "--price-mode", price_mode,
     ]
     status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.is_file() else {}
