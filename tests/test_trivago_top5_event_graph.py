@@ -6,19 +6,19 @@ from unittest.mock import patch
 
 import numpy as np
 
-from trivago_action_types import NUM_ACTIONS, EVENT_GRAPH_ENCODER, EVENT_GRAPH_FUSION
-from trivago_top5_checkpoint import (
+from src.trivago_action_types import NUM_ACTIONS, EVENT_GRAPH_ENCODER, EVENT_GRAPH_FUSION
+from src.trivago_top5_checkpoint import (
     METADATA_LOSS_REDUCTION, CANDIDATE_POLICY, checkpoint_model_arguments, validate_checkpoint,
 )
-from trivago_price_features import fit_price_scaler, flatten_candidate_records
+from src.trivago_price_features import fit_price_scaler, flatten_candidate_records
 
 try:
     import torch
     if not hasattr(torch, 'Tensor'):
         raise ImportError('Incomplete torch namespace')
-    from model import MLEUP, forward
-    from util import Data, collate_fn
-    from train_trivago_top5 import evaluate
+    from src.model import MLEUP, forward
+    from src.util import Data, collate_fn
+    from src.train_trivago_top5 import evaluate
 except (ImportError, OSError):
     torch = None
 
@@ -182,8 +182,8 @@ class EventGraphTests(unittest.TestCase):
                 else:
                     scores, labels = global_scores, torch.tensor([target])
                 fake_model = SimpleNamespace(action_mode=mode, eval=lambda: None)
-                with patch('train_trivago_top5.batch_at', return_value=None), \
-                        patch('train_trivago_top5.forward', return_value=(labels, scores, 0)):
+                with patch('src.train_trivago_top5.batch_at', return_value=None), \
+                        patch('src.train_trivago_top5.forward', return_value=(labels, scores, 0)):
                     results.append(evaluate(fake_model, dataset, candidates, 1))
             for result in results:
                 self.assertEqual(result['recall_at_5'], 1.)

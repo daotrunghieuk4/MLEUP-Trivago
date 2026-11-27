@@ -6,15 +6,15 @@ from unittest.mock import patch
 
 import numpy as np
 
-from trivago_action_types import (
+from src.trivago_action_types import (
     ACTION_ENCODER, ACTION_FUSION, ACTION_SCHEMA_VERSION, ACTION_TO_ID,
     ITEM_ACTIONS, NUM_ACTIONS, PAD_ACTION_ID, UNK_ACTION_ID,
 )
 
 try:
     import torch
-    from model import MLEUP, forward
-    from util import Data, collate_fn
+    from src.model import MLEUP, forward
+    from src.util import Data, collate_fn
 except (ImportError, OSError):
     torch = None
 
@@ -93,7 +93,7 @@ class ActionModelTests(unittest.TestCase):
     def test_cpu_model_stays_on_cpu_when_cuda_is_available(self):
         model = self.make_model().cpu()
         batch = collate_fn([self.make_dataset()[0], self.make_dataset()[1]])
-        with patch("model.torch.cuda.is_available", return_value=True):
+        with patch("src.model.torch.cuda.is_available", return_value=True):
             targets, scores, _ = forward(model, batch)
         self.assertEqual(targets.device.type, "cpu")
         self.assertEqual(scores.device.type, "cpu")

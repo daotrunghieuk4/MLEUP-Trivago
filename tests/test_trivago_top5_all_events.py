@@ -9,17 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-from prepare_trivago_top5 import prepare, DEFAULT_FIELD_BUDGET
-from trivago_action_types import (
+from src.prepare_trivago_top5 import prepare, DEFAULT_FIELD_BUDGET
+from src.trivago_action_types import (
     ACTION_TO_ID, ALL_EVENT_ENCODER, ALL_EVENT_FUSION, NUM_ACTIONS, event_token,
 )
-from trivago_top5_checkpoint import checkpoint_model_arguments, validate_checkpoint
+from src.trivago_top5_checkpoint import checkpoint_model_arguments, validate_checkpoint
 
 try:
     import torch
-    from model import MLEUP, forward
-    from util import Data, collate_fn
-    from train_trivago_top5 import make_data, evaluate
+    from src.model import MLEUP, forward
+    from src.util import Data, collate_fn
+    from src.train_trivago_top5 import make_data, evaluate
 except (ImportError, OSError):
     torch = None
 

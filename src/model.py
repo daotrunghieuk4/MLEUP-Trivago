@@ -84,7 +84,7 @@ class MLEUP(Module):
         if self.action_mode not in ('none', 'item_event', 'all_event', 'event_graph_candidate'):
             raise ValueError(f"Unsupported action_mode: {self.action_mode!r}")
         if self.action_mode == 'item_event':
-            from trivago_action_types import ACTION_ENCODER, ACTION_FUSION, NUM_ACTIONS
+            from .trivago_action_types import ACTION_ENCODER, ACTION_FUSION, NUM_ACTIONS
             if getattr(opt, 'num_actions', None) != NUM_ACTIONS:
                 raise ValueError(f'item_event requires num_actions={NUM_ACTIONS}')
             if getattr(opt, 'action_encoder', None) != ACTION_ENCODER:
@@ -99,7 +99,7 @@ class MLEUP(Module):
                 num_layers=1, batch_first=True, bidirectional=False,
             )
         if self.action_mode == 'event_graph_candidate':
-            from trivago_action_types import EVENT_GRAPH_ENCODER, EVENT_GRAPH_FUSION, NUM_ACTIONS
+            from .trivago_action_types import EVENT_GRAPH_ENCODER, EVENT_GRAPH_FUSION, NUM_ACTIONS
             if getattr(opt, 'num_actions', None) != NUM_ACTIONS:
                 raise ValueError(f'event_graph_candidate requires num_actions={NUM_ACTIONS}')
             if (getattr(opt, 'action_encoder', None) != EVENT_GRAPH_ENCODER
@@ -121,7 +121,7 @@ class MLEUP(Module):
                 nn.Linear(self.emb_size, 1),
             )
         if self.action_mode == 'all_event':
-            from trivago_action_types import ALL_EVENT_ENCODER, ALL_EVENT_FUSION
+            from .trivago_action_types import ALL_EVENT_ENCODER, ALL_EVENT_FUSION
             if (getattr(opt, 'action_encoder', None) != ALL_EVENT_ENCODER
                     or getattr(opt, 'action_fusion', None) != ALL_EVENT_FUSION):
                 raise ValueError('all_event requires the joint-pair GRU and gated session fusion')

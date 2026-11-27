@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
-from trivago_price_features import (
+from .trivago_price_features import (
     PRICE_FEATURE_SCHEMA, build_price_features, candidate_price_row,
 )
 

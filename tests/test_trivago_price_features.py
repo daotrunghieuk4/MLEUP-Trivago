@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from trivago_price_features import (
+from src.trivago_price_features import (
     PRICE_FEATURE_ORDER, PRICE_FEATURE_SCHEMA, build_price_features,
     fit_price_scaler, flatten_candidate_records, normalize_candidate_records,
     parse_prices,

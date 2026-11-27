@@ -7,15 +7,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from trivago_top5_checkpoint import restore_checkpoint_rng
+from src.trivago_top5_checkpoint import restore_checkpoint_rng
 
 try:
     import torch
     if not hasattr(torch, "Tensor"):
         raise ImportError("Incomplete torch namespace")
-    from model import MLEUP, forward
-    from util import Data, collate_fn
-    from train_trivago_top5 import evaluate
+    from src.model import MLEUP, forward
+    from src.util import Data, collate_fn
+    from src.train_trivago_top5 import evaluate
 except (ImportError, OSError):
     torch = None
 
@@ -24,7 +24,7 @@ except (ImportError, OSError):
 class ModelTests(unittest.TestCase):
     def test_fieldwise_full_model_matches_concat_with_and_without_actions(self):
         """Compare outputs in train/eval and gradients in train mode."""
-        from trivago_action_types import ACTION_ENCODER, ACTION_FUSION, NUM_ACTIONS
+        from src.trivago_action_types import ACTION_ENCODER, ACTION_FUSION, NUM_ACTIONS
         cpu_rng = torch.get_rng_state()
         self.addCleanup(torch.set_rng_state, cpu_rng)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -95,8 +95,8 @@ class ModelTests(unittest.TestCase):
         candidates = [[1, 2, 3, 4, 5, 6]] * 3
         for batch_size in (1, 2, 4):
             with self.subTest(batch_size=batch_size):
-                with patch('train_trivago_top5.batch_at', side_effect=lambda data, ids: ids), \
-                     patch('train_trivago_top5.forward',
+                with patch('src.train_trivago_top5.batch_at', side_effect=lambda data, ids: ids), \
+                     patch('src.train_trivago_top5.forward',
                            side_effect=lambda model, ids: (targets[ids], scores[ids], None)):
                     result = evaluate(unittest.mock.Mock(), list(range(3)), candidates, batch_size)
                 self.assertEqual(set(result), {'ndcg_at_5', 'recall_at_5', 'examples'})
@@ -107,8 +107,8 @@ class ModelTests(unittest.TestCase):
     def test_top5_ties_keep_impression_order(self):
         targets = torch.tensor([5, 6])
         scores = torch.ones((2, 7))
-        with patch('train_trivago_top5.batch_at', side_effect=lambda data, ids: ids), \
-             patch('train_trivago_top5.forward',
+        with patch('src.train_trivago_top5.batch_at', side_effect=lambda data, ids: ids), \
+             patch('src.train_trivago_top5.forward',
                    side_effect=lambda model, ids: (targets[ids], scores[ids], None)):
             result = evaluate(unittest.mock.Mock(), [0, 1], [[1, 2, 3, 4, 5, 6]] * 2, 2)
         self.assertEqual(result['recall_at_5'], 0.5)
@@ -161,12 +161,12 @@ class ModelTests(unittest.TestCase):
                 new_model = copy.deepcopy(template).train(training)
                 cpu_state = torch.get_rng_state()
                 cuda_state = torch.cuda.get_rng_state_all() if device.type == "cuda" else None
-                with patch("model.torch.cat", side_effect=incremental_cat):
+                with patch("src.model.torch.cat", side_effect=incremental_cat):
                     old_targets, old_scores, old_metadata_loss = forward(old_model, batch)
                 torch.set_rng_state(cpu_state)
                 if cuda_state is not None:
                     torch.cuda.set_rng_state_all(cuda_state)
-                with patch("model.torch.cat", wraps=real_cat) as cat_spy:
+                with patch("src.model.torch.cat", wraps=real_cat) as cat_spy:
                     targets, scores, metadata_loss = forward(new_model, batch)
                 metadata_cats = [call for call in cat_spy.call_args_list
                                  if call.kwargs.get("dim") == -1

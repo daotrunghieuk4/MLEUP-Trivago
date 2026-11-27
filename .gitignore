@@ -21,8 +21,14 @@ metric_history.json
 metric_history.json.tmp
 experiment_summary.csv
 experiment_summary.csv.tmp
+experiment_summary.csv.*.tmp
 epoch_timing.csv
 epoch_timing.csv.tmp
+epoch_timing.csv.*.tmp
+best_experiments.json
+best_experiments.json.*.tmp
+ablation_comparison.csv
+ablation_comparison.csv.*.tmp
 *.zip
 *.sqlite*
 .DS_Store

@@ -1,6 +1,5 @@
 """CPU coverage of timed checkpoint recovery and Databricks notebook orchestration."""
 
-import ast
 import contextlib
 import io
 import os
@@ -11,10 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from src import experiment_runner
+from src.experiment_reporting import export_results
 
 try:
     import torch
-    import train_trivago_top5 as trainer
+    from src import train_trivago_top5 as trainer
 except (ImportError, OSError):
     torch = None
 
@@ -272,75 +273,67 @@ class AblationTimingTests(unittest.TestCase):
         self.assertEqual([path.read_bytes() for path in (self.latest, self.best)], before)
 
     def notebook(self, prepared):
-        notebook = Path(__file__).resolve().parents[1] / "databricks_mleup_ablation.py"
-        # Load definitions without running the Databricks setup and training cells.
-        source = ast.parse(notebook.read_text(encoding="utf-8"))
-        definitions = ast.Module(body=[node for node in source.body if isinstance(node, ast.FunctionDef)],
-                                 type_ignores=[])
-        namespace = dict(
-            pd=pd, os=os, RUNS_DIR=self.root, prepared=prepared, EPOCHS=1,
-            BATCH_SIZE=1, PATIENCE=5, MIN_DELTA=.0001, LOSS_PATIENCE=50, CHECKPOINT_EVERY=1, MAX_HOURS=0,
-            TRACK_TIME=True, EPOCH_TIMING_FIELDS=trainer.EPOCH_TIMING_FIELDS, numeric=trainer.numeric,
-            read_json=trainer.read_json, timed_epochs=trainer.timed_epochs, valid_test_status=trainer.valid_test_status,
-        )
-        exec(compile(definitions, str(notebook), "exec"), namespace)
+        path = Path(__file__).resolve().parents[1] / "databricks_mleup_ablation.py"
+        cells = path.read_text(encoding="utf-8").split("# COMMAND ----------")[1:]
+        namespace = {}
+        exec(compile(cells[0], str(path), "exec"), namespace)
+        namespace.update(RUNS_DIR=self.root, prepared=prepared)
+        namespace["TRAINING"].update(epochs=1, batch_size=1, emb_size=4, num_heads=2, sample_order=2,
+                                     checkpoint_every=1, max_hours=0)
+        exec(compile(cells[3], str(path), "exec"), namespace)
         return namespace
 
     def test_notebook_runs_all_four_variants_and_exports_consistent_csv(self):
         notebook = self.notebook({18: self.prepared, 53: self.make_prepared(53)})
-        models = [
-            ("01_baseline_53", 53, "none", "off"),
-            ("02_baseline_18", 18, "none", "off"),
-            ("03_event_graph_18", 18, "event_graph_candidate", "off"),
-            ("04_event_graph_price_18", 18, "event_graph_candidate", "relative_mlp_v1"),
-        ]
+        experiments = notebook["EXPERIMENTS"]
+        models = list(experiments)
         commands = []
 
-        def run_script(script, *args):
+        def run_script(repo, *args):
             commands.append(args)
-            self.invoke(*args, "--emb-size", "4", "--num-heads", "2", "--sample-order", "2")
+            self.invoke(*args[args.index("--prepared-dir"):])
 
-        notebook["run_script"] = run_script
-        run = notebook["train_and_evaluate"]
-        completed = self.root / models[0][0]
-        with contextlib.redirect_stdout(io.StringIO()):
-            notebook["run_script"] = lambda script, *args: run_script(script, *args, "--max-batches", "2")
-            run(*models[0])
+        run = notebook["run_experiment"]
+        completed = self.root / models[0]
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(experiment_runner, "run_script") as process:
+            process.side_effect = lambda repo, *args: run_script(repo, *args, "--max-batches", "2")
+            run(models[0])
             self.assertFalse((completed / self.best.name).exists())
             (completed / self.status.name).write_text("{", encoding="utf-8")
-            notebook["run_script"] = run_script
+            process.side_effect = run_script
             for model in models:
-                run(*model)
+                run(model)
             self.assertIn("--resume", commands[1])
             self.assertIn("--eval-only", commands[2])
             self.assertTrue(all("--track-time" in cmd for cmd in commands))
             self.assertEqual(Path(commands[0][commands[0].index("--output-dir") + 1]), completed)
             checkpoint_bytes = {path: path.read_bytes() for path in completed.glob("*.pth")}
             commands.clear()
-            run(*models[0])
+            run(models[0])
             self.assertEqual(len(commands), 1)
             self.assertIn("--resume", commands[0])
             status = trainer.read_json(completed / self.status.name, dict)
             status["best_checkpoint_id"] = "stale-result"
             trainer.atomic_json(completed / self.status.name, status)
-            run(*models[0])
+            run(models[0])
             self.assertIn("--eval-only", commands[-1])
             for path, content in checkpoint_bytes.items():
                 self.assertEqual(path.read_bytes(), content)
-            summary = notebook["summarize_runs"](self.root, True)
-            self.assertEqual(list(summary["model"]), [model[0] for model in models])
-            for model, *_ in models:
+            report, summary, _, _ = export_results(self.root, experiments)
+            self.assertEqual(list(summary["model"]), models)
+            for model in models:
                 status = trainer.read_json(self.root / model / self.status.name, dict)
                 self.assertTrue(trainer.valid_test_status(status, True))
                 self.assertEqual(status["metrics"]["examples"], 2)
+                self.assertEqual(report["experiments"][model]["hyperparameters"]["batch_size"], 1)
             timeline = pd.read_csv(self.root / "epoch_timing.csv")
             self.assertEqual(len(timeline), 4)
             first = timeline.iloc[0]
             self.assertAlmostEqual(summary.iloc[0]["time_to_best_min"],
                                    (first["epoch_time_seconds"] + first["val_retry_seconds"]) / 60)
-            for model, *_ in models:
+            for model in models:
                 (self.root / model / self.status.name).unlink()
-            self.assertTrue(notebook["summarize_runs"](self.root, True).empty)
+            self.assertTrue(export_results(self.root, experiments)[1].empty)
             self.assertTrue(pd.read_csv(self.root / "experiment_summary.csv").empty)
             self.assertEqual(len(pd.read_csv(self.root / "epoch_timing.csv")), 4)
 
@@ -349,10 +342,10 @@ class AblationTimingTests(unittest.TestCase):
         self.train("--epochs", "1", output=run)
         self.train("--epochs", "1", "--eval-only", "test", output=run)
         with contextlib.redirect_stdout(io.StringIO()):
-            summary = self.notebook({})["summarize_runs"](self.root, False)
+            summary = export_results(self.root, self.notebook({})["EXPERIMENTS"])[1]
         self.assertEqual(list(summary["model"]), ["02_baseline_18"])
         self.assertIn("ndcg_at_5", summary.columns)
-        self.assertNotIn("test_time_min", summary.columns)
+        self.assertTrue(summary["test_time_min"].isna().all())
 
 
 if __name__ == "__main__":

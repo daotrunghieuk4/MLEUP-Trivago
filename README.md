@@ -20,20 +20,27 @@ Các số liệu thuộc lần chạy đã lưu. Tập train, validation và tes
 
 ```text
 MLEUP-Trivago/
-├── model.py                      # Kiến trúc MLEUP và tính điểm
-├── util.py                       # Dataset, batch và đồ thị
-├── prepare_trivago_top5.py       # Chuyển dữ liệu thô thành dữ liệu mô hình
-├── train_trivago_top5.py         # Huấn luyện, resume và đánh giá
-├── trivago_action_types.py      # Schema hành động
-├── trivago_price_features.py    # Đặc trưng và chuẩn hóa giá
-├── trivago_top5_checkpoint.py   # Kiểm tra checkpoint, early stopping
-├── tests/                       # Kiểm thử hiện có
-├── results/                     # Bằng chứng kết quả và cấu hình
+├── databricks_mleup_ablation.py   # Notebook chính
+├── src/
+│   ├── model.py, util.py          # Model, dataset, batch và đồ thị
+│   ├── prepare_trivago_top5.py    # Tiền xử lý
+│   ├── train_trivago_top5.py      # Train, resume, evaluation và timing
+│   ├── trivago_action_types.py
+│   ├── trivago_price_features.py
+│   ├── trivago_top5_checkpoint.py
+│   ├── trivago_data_parts.py
+│   ├── experiment_runner.py      # Điều phối notebook và subprocess
+│   ├── experiment_reporting.py   # Tổng hợp JSON và CSV
+│   └── run_metadata.py           # Metadata và kiểm tra báo cáo
+├── data_parts/                   # Manifest và các phần nén của hai CSV
+├── tests/                        # Kiểm thử và fixture nhỏ
+├── results/                      # Kết quả nghiên cứu đã lưu trong Git
+├── runs/                         # Checkpoint và báo cáo phát sinh, bỏ qua bởi Git
 ├── requirements.txt
-└── .gitignore
+└── .gitignore, .gitattributes
 ```
 
-Các module nằm cùng cấp để giữ nguyên các import và lệnh chạy của bộ model. Thư mục `data/` và `runs/` được tạo khi chuẩn bị dữ liệu và huấn luyện.
+Các file `train_trivago_top5.py`, `prepare_trivago_top5.py` và `trivago_data_parts.py` ở thư mục gốc là wrapper cho CLI và import cũ. Implementation nằm trong `src/`. Thư mục `data/` và `runs/` được tạo khi chuẩn bị dữ liệu và huấn luyện.
 
 ## Cài đặt
 
@@ -90,35 +97,67 @@ Get-FileHash data/raw/train.csv, data/raw/item_metadata.csv -Algorithm SHA256
 
 Trên Linux dùng `sha256sum data/raw/train.csv data/raw/item_metadata.csv`. Trên macOS dùng `shasum -a 256 data/raw/train.csv data/raw/item_metadata.csv`. Checksum khác có thể phản ánh khác biệt phiên bản hoặc nội dung tệp, cần kiểm tra trước khi đối chiếu kết quả thí nghiệm.
 
-### Dùng bộ CSV chia phần trên Databricks
+## Thiết lập Databricks
 
-Sao lưu thay đổi và checkpoint hiện có trước khi **Pull** trong Databricks Git Folder. Mở `databricks_mleup_ablation.py` ở thư mục gốc trên cùng loại compute/GPU cho cả bốn cấu hình. Chạy cell cấu hình rồi cell chuẩn bị dữ liệu. Notebook kiểm tra SHA-256 của `data_parts/`, khôi phục hai CSV vào đĩa tạm và dựng lại hai bộ prepared khi cần.
+1. Tạo Databricks Git Folder từ repository, hoặc sao lưu thay đổi và checkpoint rồi **Pull** nếu đã có Git Folder.
+2. Mở `databricks_mleup_ablation.py` ở thư mục gốc. Chỉnh dữ liệu và hyperparameter trong **Configuration**. Dùng cùng loại compute và GPU cho cả bốn cấu hình.
+3. Chạy **Environment and Checkpoint Status**. Đối chiếu GPU, runtime, quyền ghi và `RUNS_DIR` với lượt cũ. Bảng trạng thái đọc JSON và kiểm tra sự hiện diện của tệp, còn trainer kiểm tra payload khi resume.
+4. Chạy **Data Preparation** và **Experiment Pipeline**. Notebook xác minh SHA-256 của các phần nén khi khôi phục CSV. Nó kiểm tra fingerprint của artifact, metadata, mapping, query manifest và candidate lists trước khi tái sử dụng hai bộ prepared. Ba mô hình 18 trường dùng chung một bộ. Nếu bộ prepared đang có bị hỏng, dùng vị trí prepared sạch hoặc khởi động lại phiên để tạo scratch mới.
 
-Các cell training ghi trực tiếp vào `runs/databricks_checkpoints/seed2023_e50_b128_timed_v1/`. Mỗi cấu hình có `result_latest.pth` để tiếp tục huấn luyện và `result_best.pth` để test theo NDCG@5 validation. Trainer lưu latest mỗi 1.000 bước optimizer, trước và sau validation, khi tạm dừng có kiểm soát, và khi kết thúc hoặc early stop. Khi epoch lập best mới, trainer lưu latest trước rồi xuất bản best từ cùng payload. Nếu bị ngắt giữa hai lần ghi, lần resume có thể khôi phục best từ latest của chính epoch được chọn. Chạy mỗi thư mục output bằng một trainer tại một thời điểm.
+Mặc định checkpoint được ghi trực tiếp vào `runs/databricks_checkpoints/seed2023_e50_b128_timed_v1/`. Có thể đặt biến môi trường `MLEUP_CHECKPOINT_ROOT` sang vị trí bền vững đã được cấp quyền. Khi thay dữ liệu hoặc hyperparameter làm checkpoint cũ không tương thích, dùng nhóm run mới. Nếu Git Folder không có `data_parts/`, notebook dùng `RAW_DIR` và `EXPERIMENT_DIR` trong Configuration.
 
-Nếu phiên bị ngắt, chạy lại cell cấu hình và preprocessing nếu scratch đã mất. Chạy lại cell của mô hình tương ứng để resume. Lần chạy đã huấn luyện xong sẽ test checkpoint best nếu thiếu kết quả test hợp lệ. Các batch sau lần lưu latest cuối cùng có thể phải chạy lại. Validation bị ngắt sẽ chạy lại từ đầu mà không lặp lại các batch huấn luyện đã lưu.
+### Chạy và resume thực nghiệm
 
-Chạy cell cuối để lấy `experiment_summary.csv` và `epoch_timing.csv` trong thư mục run. Bảng tổng hợp chỉ chứa các cấu hình đã train và test xong. Bảng theo epoch có cả epoch hoàn thành của các lượt đang tạm dừng. `time_to_best_min` cộng thời gian train, validation thành công và retry validation đã ghi nhận qua best epoch. Đối chiếu số epoch và môi trường GPU/runtime trước khi so sánh. Inference ms/mẫu là thời gian forward bình quân theo batch size đã dùng.
+| Cell | Experiment ID | Thay đổi nghiên cứu |
+|---|---|---|
+| Baseline 53 | `01_baseline_53` | Baseline MLEUP với 53 trường metadata |
+| Baseline 18 | `02_baseline_18` | Giảm metadata còn 18 trường |
+| Improvement 1 | `03_event_graph_18` | Event Graph, attention theo ứng viên và loss trên impressions |
+| Improvement 2 | `04_event_graph_price_18` | Bổ sung Relative Price Features |
 
-Giữ nguyên đường dẫn khi resume. Khi thay dataset hoặc hyperparameter ngoài seed, epoch budget và batch size, chọn root mới. Có thể đặt biến môi trường `MLEUP_CHECKPOINT_ROOT` thành đường dẫn bền vững đã được cấp quyền trước khi chạy cell cấu hình. Giữ checkpoint cũ ở thư mục riêng, vì lượt `timed_v1` cần số liệu từ đầu. Khi đặt `TRACK_TIME=False`, notebook vẫn tổng hợp NDCG@5 và Recall@5 trong thư mục run riêng.
+Chạy riêng cell của mô hình cần train hoặc resume, hoặc dùng **Run All**. Mỗi mô hình có `result_latest.pth` để tiếp tục huấn luyện và `result_best.pth` để test theo NDCG@5 validation. Trainer lưu latest mỗi 1.000 bước optimizer, trước và sau validation, khi tạm dừng có kiểm soát và khi kết thúc. Khi có best mới, trainer ghi latest trước rồi xuất bản best từ cùng payload. Chạy mỗi thư mục mô hình bằng một trainer tại một thời điểm.
+
+Sau khi mất phiên, chạy lại các cell 1–4 để khôi phục môi trường và prepared nếu scratch đã mất. Chạy lại đúng cell mô hình. Các batch sau lần lưu latest cuối cùng có thể phải chạy lại. Nếu latest đã lưu hết batch của epoch, trainer chỉ chạy lại validation. Mô hình đã train xong sẽ test best nếu thiếu kết quả hợp lệ, hoặc đọc kết quả đã lưu.
+
+### Timing và báo cáo thực nghiệm
+
+Train time tính phần chuẩn bị và xử lý batch huấn luyện. Validation time tính lần validation thành công, còn lượt validation dừng có kiểm soát được ghi riêng dưới dạng retry. Time to best cộng train, validation thành công và retry đã ghi nhận đến best epoch. Test time tính toàn bộ evaluation sau lúc chuẩn bị tập test. Inference ms/mẫu và throughput tính từ forward theo batch và số mẫu thực tế. So sánh timing cần GPU, runtime, batch size và cách đo tương đương. Đặt `TRAINING["track_time"] = False` để chạy nhóm không đo thời gian.
+
+**Experiment Summary** có thể chạy ngay sau **Configuration** để đọc một `RUNS_DIR` hiện có. Các file trong `RUNS_DIR` cũng được cập nhật tự động khi một mô hình tạm dừng có kiểm soát, hoàn thành hoặc được mở lại.
+
+| File | Nội dung |
+|---|---|
+| `best_experiments.json` | File tra cứu chính. Ghi run ID, trạng thái cả bốn mô hình, hyperparameter thực tế, best epoch và loss/metric tại epoch đó, test, timing, môi trường và đường dẫn checkpoint |
+| `experiment_summary.csv` | Accuracy và chi phí tính toán của các lượt đã train và test hợp lệ |
+| `epoch_timing.csv` | Timing, train/validation loss và validation metric theo epoch, kể cả lượt chưa hoàn thành |
+| `ablation_comparison.csv` | Ba cặp ablation theo thứ tự nghiên cứu. `train_time_before_min` và `train_time_after_min` là thời gian train trung bình mỗi epoch |
+
+`run_status.json` ghi hyperparameter thực tế và thông tin phiên đã dùng. Report đối chiếu trạng thái với lịch sử đầy đủ và metadata của tệp checkpoint, còn các tensor nằm trong `result_best.pth`. Các trường cũ chưa từng ghi nhận được để `null`. Best epoch thuộc một run cụ thể và được chọn theo NDCG@5 validation. Các hạng theo test metric chỉ mô tả kết quả của nhóm đang xem. Chênh lệch tương đối để trống khi mẫu số bằng 0 hoặc thiếu dữ liệu. Khi môi trường không tương đương, báo cáo cảnh báo và để trống tỷ lệ thay đổi thời gian của cặp tương ứng.
+
+### Thêm cấu hình thực nghiệm
+
+Thêm một ID duy nhất vào `EXPERIMENTS` trong Configuration, khai báo số trường, action/price mode, tên hiển thị và mô tả so sánh với cấu hình liền trước. Thêm một cell gọi `run_experiment(experiment_id)`. Pipeline tự gom các cấu hình cùng số trường vào một bộ prepared chung và báo cáo theo thứ tự trong `EXPERIMENTS`. Giữ ID cũ cho các lượt cần resume.
 
 #### Kiểm tra checkpoint qua lần restart compute
 
-Sau cell preprocessing và cell định nghĩa `training_command`, chạy smoke test trong một cell riêng trên compute có thể restart an toàn:
+Sau các cell 1–4, chạy smoke test trong một cell riêng trên compute có thể restart an toàn.
 
 ```python
-smoke = CHECKPOINT_ROOT / "_smoke_timing_v1"
+smoke = CHECKPOINT_ROOT.expanduser().resolve() / "_smoke_timing_v1"
 if smoke.exists():
     raise FileExistsError(smoke)
-command = training_command(smoke, 18, "none", "off")
-assert "--track-time" in command
-run_script(*command, "--epochs", "2", "--checkpoint-every", "1", "--max-batches", "2")
+spec = EXPERIMENTS["02_baseline_18"]
+smoke_training = {**TRAINING, "epochs": 2, "checkpoint_every": 1, "track_time": True}
+command = experiment_runner.build_train_command(spec, smoke_training, prepared[spec["fields"]], smoke)
+experiment_runner.run_script(REPO, *command, "--max-batches", "2")
 ```
 
 Ghi lại đường dẫn, kích thước và trạng thái bằng cell sau. Chỉ đọc checkpoint do chính lượt chạy tạo.
 
 ```python
-smoke = CHECKPOINT_ROOT / "_smoke_timing_v1"
+import torch
+
+smoke = CHECKPOINT_ROOT.expanduser().resolve() / "_smoke_timing_v1"
 path = smoke / "result_latest.pth"
 assert path.is_file(), path
 cp = torch.load(path, map_location="cpu", weights_only=False)
@@ -127,12 +166,13 @@ print(cp["epoch"], cp["global_step"], cp["next_offset"], cp["timing_state"])
 del cp
 ```
 
-Restart compute. Chạy lại cấu hình và định nghĩa hàm cần thiết, rồi **chỉ chạy cell đọc** và so sánh với giá trị đã ghi. Dựng lại prepared nếu scratch mất. Resume smoke bằng lệnh sau rồi đọc lại checkpoint. Kỳ vọng epoch vẫn là `0`, `global_step` tăng từ `2` lên `4`, `next_offset` từ `2 * BATCH_SIZE` lên `4 * BATCH_SIZE`, và `train_time_seconds` tăng.
+Restart compute. Chạy lại Configuration rồi **chỉ chạy cell đọc** checkpoint và so sánh với giá trị đã ghi. Chạy các cell 2–4 để tạo lại prepared nếu cần. Resume smoke bằng lệnh sau rồi đọc lại checkpoint. Epoch vẫn là `0`, `global_step` tăng từ `2` lên `4`, `next_offset` từ `2 * TRAINING["batch_size"]` lên `4 * TRAINING["batch_size"]`, và `train_time_seconds` tăng.
 
 ```python
-command = training_command(smoke, 18, "none", "off")
-run_script(*command, "--epochs", "2", "--checkpoint-every", "1",
-           "--resume", "--max-batches", "4")
+spec = EXPERIMENTS["02_baseline_18"]
+smoke_training = {**TRAINING, "epochs": 2, "checkpoint_every": 1, "track_time": True}
+command = experiment_runner.build_train_command(spec, smoke_training, prepared[spec["fields"]], smoke)
+experiment_runner.run_script(REPO, *command, "--resume", "--max-batches", "4")
 ```
 
 Kiểm tra dung lượng thực tế đủ cho latest, best và tệp tạm khi ghi, tính trên cả bốn cấu hình. Workspace Files có giới hạn 500 MB mỗi tệp. Nếu smoke không tồn tại sau restart, vượt giới hạn hoặc storage không hỗ trợ khóa ghi và thay thế file, đặt `MLEUP_CHECKPOINT_ROOT` sang đường dẫn bền vững khác đã được cấp quyền và thử lại. [Giới hạn Workspace Files của Databricks](https://docs.databricks.com/aws/en/files/workspace#limitations)
@@ -140,17 +180,15 @@ Kiểm tra dung lượng thực tế đủ cho latest, best và tệp tạm khi 
 Để đóng gói lại từ hai CSV đã giải nén, chạy ở thư mục gốc repo. Mỗi phần mặc định tối đa 90 MiB để dùng Git thường trên GitHub.
 
 ```bash
-python trivago_data_parts.py data/raw artifacts/trivago_git_parts
+python -m src.trivago_data_parts data/raw artifacts/trivago_git_parts
 ```
 
-Nếu Git Folder không có `data_parts/`, notebook dùng `RAW_DIR` và `EXPERIMENT_DIR` như trước.
-
-## Chuẩn bị dữ liệu
+## Chuẩn bị dữ liệu trên local
 
 Đặt hai tệp dữ liệu Trivago tại `data/raw/train.csv` và `data/raw/item_metadata.csv`. Các cột sự kiện được sử dụng gồm user/session, timestamp, action, reference, impressions và prices. Preprocessor kiểm tra schema khi đọc dữ liệu.
 
 ```powershell
-python prepare_trivago_top5.py --train-csv data/raw/train.csv --metadata-csv data/raw/item_metadata.csv --output-dir data/prepared --field-budget 15 --action-scope item_event --max-session-items 20 --max-session-events 64 --max-neighbors 400 --m 14 --frequency 10 --seed 2023
+python -m src.prepare_trivago_top5 --train-csv data/raw/train.csv --metadata-csv data/raw/item_metadata.csv --output-dir data/prepared --field-budget 15 --action-scope item_event --max-session-items 20 --max-session-events 64 --max-neighbors 400 --m 14 --frequency 10 --seed 2023
 ```
 
 `--field-budget 15` chọn 15 thuộc tính nhị phân theo các bộ lọc xuất hiện trong tập train. Kết hợp ba trường `star_rating`, `from_star_max`, `rating_highest`, mô hình có tổng cộng 18 trường metadata. Cấu hình và checksum của dữ liệu trong lần chạy đã báo cáo nằm tại [prepared_config.json](results/prepared_config.json).
@@ -160,7 +198,7 @@ Preprocessor tạo mapping khách sạn, metadata, đồ thị, các tập ứng
 ## Huấn luyện
 
 ```powershell
-python train_trivago_top5.py --prepared-dir data/prepared --output-dir runs/relative_price_v1 --epochs 5 --batch-size 256 --emb-size 16 --num-heads 4 --metadata-projection fieldwise --action-mode event_graph_candidate --price-mode relative_mlp_v1 --lr 0.001 --lr-factor 0.5 --lr-patience 1 --min-lr 0.00001 --min-delta 0.0001 --patience 3 --loss-patience 3 --loss-min-delta 0.001
+python -m src.train_trivago_top5 --prepared-dir data/prepared --output-dir runs/relative_price_v1 --epochs 5 --batch-size 256 --emb-size 16 --num-heads 4 --metadata-projection fieldwise --action-mode event_graph_candidate --price-mode relative_mlp_v1 --lr 0.001 --lr-factor 0.5 --lr-patience 1 --min-lr 0.00001 --min-delta 0.0001 --patience 3 --loss-patience 3 --loss-min-delta 0.001
 ```
 
 Mô hình học biểu diễn metadata và lịch sử hành động, tổng hợp thông tin sự kiện theo từng ứng viên rồi kết hợp đặc trưng giá để xếp hạng. Chính sách lịch sử ghi nhận clickout trong train và che clickout trong validation/test. Trainer chọn checkpoint bằng NDCG@5 validation và áp dụng điều kiện dừng theo metric/loss.
@@ -170,7 +208,7 @@ Mô hình học biểu diễn metadata và lịch sử hành động, tổng h�
 ## Đánh giá checkpoint
 
 ```powershell
-python train_trivago_top5.py --prepared-dir data/prepared --output-dir runs/relative_price_v1 --batch-size 256 --emb-size 16 --num-heads 4 --metadata-projection fieldwise --action-mode event_graph_candidate --price-mode relative_mlp_v1 --eval-only test
+python -m src.train_trivago_top5 --prepared-dir data/prepared --output-dir runs/relative_price_v1 --batch-size 256 --emb-size 16 --num-heads 4 --metadata-projection fieldwise --action-mode event_graph_candidate --price-mode relative_mlp_v1 --eval-only test
 ```
 
 Lệnh đánh giá xác nhận lượt chạy đã hoàn tất từ `result_latest.pth` rồi nạp `result_best.pth`. Để đánh giá lại kết quả đã báo cáo từ bản lưu cũ, có thể dùng checkpoint best epoch 4 với `run_status.json` hoàn thành và toàn bộ prepared tương ứng của bộ `context_price_v1` trong chế độ không đo thời gian. Với `--track-time`, test time bao gồm toàn bộ evaluation sau khi load checkpoint và chuẩn bị tập test. Inference time chỉ tính forward hiện tại. Việc huấn luyện lại có thể cho số liệu khác do môi trường và tính ngẫu nhiên.
@@ -179,11 +217,13 @@ Lệnh đánh giá xác nhận lượt chạy đã hoàn tất từ `result_late
 
 ```powershell
 python -m unittest discover -s tests -v
-python prepare_trivago_top5.py --help
-python train_trivago_top5.py --help
+python -m compileall -q src tests
+python -m py_compile databricks_mleup_ablation.py
+python -m src.prepare_trivago_top5 --help
+python -m src.train_trivago_top5 --help
 ```
 
-Các kiểm thử bao phủ chuẩn bị dữ liệu, hành động, đồ thị sự kiện, đặc trưng giá, checkpoint và báo cáo metric.
+Các kiểm thử bao phủ prepared integrity, cấu hình bốn mô hình, hành động, đồ thị sự kiện, đặc trưng giá, checkpoint, timing và báo cáo độc lập.
 
 ## Trích dẫn
 

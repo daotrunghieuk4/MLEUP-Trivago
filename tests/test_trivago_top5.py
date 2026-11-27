@@ -9,8 +9,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, sentinel
 
-from prepare_trivago_top5 import build_groups, fingerprint_file, prepare
-from trivago_top5_checkpoint import (
+from src.prepare_trivago_top5 import build_groups, fingerprint_file, prepare
+from src.trivago_top5_checkpoint import (
     checkpoint_model_arguments, restore_checkpoint_rng, validate_checkpoint,
     best_validation_ndcg,
 )

@@ -9,7 +9,7 @@ import unittest
 import weakref
 from pathlib import Path
 from unittest.mock import patch
-from trivago_top5_checkpoint import new_early_stopping, update_early_stopping
+from src.trivago_top5_checkpoint import new_early_stopping, update_early_stopping
 
 
 class DualStoppingPolicyTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class DualStoppingPolicyTests(unittest.TestCase):
 
 try:
     import torch
-    import train_trivago_top5 as trainer
+    from src import train_trivago_top5 as trainer
 except (ImportError, OSError):
     torch = None
 
