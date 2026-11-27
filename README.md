@@ -92,7 +92,50 @@ Trên Linux dùng `sha256sum data/raw/train.csv data/raw/item_metadata.csv`. Tr�
 
 ### Dùng bộ CSV chia phần trên Databricks
 
-Nhánh `main` lưu bộ CSV dưới dạng các phần nén trong `data_parts/`. Clone repo bằng **Create Git Folder**, mở `databricks_mleup_ablation.py` ở thư mục gốc và chạy cell cấu hình trước. Notebook kiểm tra SHA-256 từng phần, khôi phục hai CSV vào đĩa tạm rồi chạy pipeline cũ. Dữ liệu đã xử lý và checkpoint trên đĩa tạm có thể mất khi compute dừng.
+Sao lưu thay đổi và checkpoint hiện có trước khi **Pull** trong Databricks Git Folder. Mở `databricks_mleup_ablation.py` ở thư mục gốc trên cùng loại compute/GPU cho cả bốn cấu hình. Chạy cell cấu hình rồi cell chuẩn bị dữ liệu. Notebook kiểm tra SHA-256 của `data_parts/`, khôi phục hai CSV vào đĩa tạm và dựng lại hai bộ prepared khi cần.
+
+Các cell training ghi trực tiếp vào `runs/databricks_checkpoints/seed2023_e50_b128_timed_v1/`. Mỗi cấu hình có `result_latest.pth` để tiếp tục huấn luyện và `result_best.pth` để test theo NDCG@5 validation. Trainer lưu latest mỗi 1.000 bước optimizer, trước và sau validation, khi tạm dừng có kiểm soát, và khi kết thúc hoặc early stop. Khi epoch lập best mới, trainer lưu latest trước rồi xuất bản best từ cùng payload. Nếu bị ngắt giữa hai lần ghi, lần resume có thể khôi phục best từ latest của chính epoch được chọn. Chạy mỗi thư mục output bằng một trainer tại một thời điểm.
+
+Nếu phiên bị ngắt, chạy lại cell cấu hình và preprocessing nếu scratch đã mất. Chạy lại cell của mô hình tương ứng để resume. Lần chạy đã huấn luyện xong sẽ test checkpoint best nếu thiếu kết quả test hợp lệ. Các batch sau lần lưu latest cuối cùng có thể phải chạy lại. Validation bị ngắt sẽ chạy lại từ đầu mà không lặp lại các batch huấn luyện đã lưu.
+
+Chạy cell cuối để lấy `experiment_summary.csv` và `epoch_timing.csv` trong thư mục run. Bảng tổng hợp chỉ chứa các cấu hình đã train và test xong. Bảng theo epoch có cả epoch hoàn thành của các lượt đang tạm dừng. `time_to_best_min` cộng thời gian train, validation thành công và retry validation đã ghi nhận qua best epoch. Đối chiếu số epoch và môi trường GPU/runtime trước khi so sánh. Inference ms/mẫu là thời gian forward bình quân theo batch size đã dùng.
+
+Giữ nguyên đường dẫn khi resume. Khi thay dataset hoặc hyperparameter ngoài seed, epoch budget và batch size, chọn root mới. Có thể đặt biến môi trường `MLEUP_CHECKPOINT_ROOT` thành đường dẫn bền vững đã được cấp quyền trước khi chạy cell cấu hình. Giữ checkpoint cũ ở thư mục riêng, vì lượt `timed_v1` cần số liệu từ đầu. Khi đặt `TRACK_TIME=False`, notebook vẫn tổng hợp NDCG@5 và Recall@5 trong thư mục run riêng.
+
+#### Kiểm tra checkpoint qua lần restart compute
+
+Sau cell preprocessing và cell định nghĩa `training_command`, chạy smoke test trong một cell riêng trên compute có thể restart an toàn:
+
+```python
+smoke = CHECKPOINT_ROOT / "_smoke_timing_v1"
+if smoke.exists():
+    raise FileExistsError(smoke)
+command = training_command(smoke, 18, "none", "off")
+assert "--track-time" in command
+run_script(*command, "--epochs", "2", "--checkpoint-every", "1", "--max-batches", "2")
+```
+
+Ghi lại đường dẫn, kích thước và trạng thái bằng cell sau. Chỉ đọc checkpoint do chính lượt chạy tạo.
+
+```python
+smoke = CHECKPOINT_ROOT / "_smoke_timing_v1"
+path = smoke / "result_latest.pth"
+assert path.is_file(), path
+cp = torch.load(path, map_location="cpu", weights_only=False)
+print(path.resolve(), path.stat().st_size, "bytes")
+print(cp["epoch"], cp["global_step"], cp["next_offset"], cp["timing_state"])
+del cp
+```
+
+Restart compute. Chạy lại cấu hình và định nghĩa hàm cần thiết, rồi **chỉ chạy cell đọc** và so sánh với giá trị đã ghi. Dựng lại prepared nếu scratch mất. Resume smoke bằng lệnh sau rồi đọc lại checkpoint. Kỳ vọng epoch vẫn là `0`, `global_step` tăng từ `2` lên `4`, `next_offset` từ `2 * BATCH_SIZE` lên `4 * BATCH_SIZE`, và `train_time_seconds` tăng.
+
+```python
+command = training_command(smoke, 18, "none", "off")
+run_script(*command, "--epochs", "2", "--checkpoint-every", "1",
+           "--resume", "--max-batches", "4")
+```
+
+Kiểm tra dung lượng thực tế đủ cho latest, best và tệp tạm khi ghi, tính trên cả bốn cấu hình. Workspace Files có giới hạn 500 MB mỗi tệp. Nếu smoke không tồn tại sau restart, vượt giới hạn hoặc storage không hỗ trợ khóa ghi và thay thế file, đặt `MLEUP_CHECKPOINT_ROOT` sang đường dẫn bền vững khác đã được cấp quyền và thử lại. [Giới hạn Workspace Files của Databricks](https://docs.databricks.com/aws/en/files/workspace#limitations)
 
 Để đóng gói lại từ hai CSV đã giải nén, chạy ở thư mục gốc repo. Mỗi phần mặc định tối đa 90 MiB để dùng Git thường trên GitHub.
 
@@ -122,7 +165,7 @@ python train_trivago_top5.py --prepared-dir data/prepared --output-dir runs/rela
 
 Mô hình học biểu diễn metadata và lịch sử hành động, tổng hợp thông tin sự kiện theo từng ứng viên rồi kết hợp đặc trưng giá để xếp hạng. Chính sách lịch sử ghi nhận clickout trong train và che clickout trong validation/test. Trainer chọn checkpoint bằng NDCG@5 validation và áp dụng điều kiện dừng theo metric/loss.
 
-Để tiếp tục lần chạy bị gián đoạn, chạy lại lệnh với `--resume`, giữ cùng prepared, output và cấu hình mô hình. Các checkpoint và log được lưu trong thư mục output.
+Để tiếp tục lần chạy bị gián đoạn, chạy lại lệnh với `--resume`, giữ cùng prepared, output và cấu hình mô hình. Thêm `--track-time` từ lúc bắt đầu một lượt mới nếu cần ghi thời gian từng epoch và giữ cờ này khi resume hoặc đánh giá. Các checkpoint và báo cáo được lưu trong thư mục output.
 
 ## Đánh giá checkpoint
 
@@ -130,7 +173,7 @@ Mô hình học biểu diễn metadata và lịch sử hành động, tổng h�
 python train_trivago_top5.py --prepared-dir data/prepared --output-dir runs/relative_price_v1 --batch-size 256 --emb-size 16 --num-heads 4 --metadata-projection fieldwise --action-mode event_graph_candidate --price-mode relative_mlp_v1 --eval-only test
 ```
 
-Lệnh đánh giá sử dụng `result_best.pth` trong thư mục output và yêu cầu `run_status.json` xác nhận lần huấn luyện đã hoàn tất (`COMPLETE`, `EARLY_STOPPED` hoặc `EVALUATED`). Để đánh giá lại kết quả đã báo cáo, cung cấp checkpoint epoch 4, trạng thái lần chạy và toàn bộ prepared tương ứng của bộ `context_price_v1`. Repository chứa mã nguồn và bằng chứng JSON/log, còn dữ liệu và trọng số được quản lý riêng. Việc huấn luyện lại có thể cho số liệu khác do môi trường và tính ngẫu nhiên.
+Lệnh đánh giá xác nhận lượt chạy đã hoàn tất từ `result_latest.pth` rồi nạp `result_best.pth`. Để đánh giá lại kết quả đã báo cáo từ bản lưu cũ, có thể dùng checkpoint best epoch 4 với `run_status.json` hoàn thành và toàn bộ prepared tương ứng của bộ `context_price_v1` trong chế độ không đo thời gian. Với `--track-time`, test time bao gồm toàn bộ evaluation sau khi load checkpoint và chuẩn bị tập test. Inference time chỉ tính forward hiện tại. Việc huấn luyện lại có thể cho số liệu khác do môi trường và tính ngẫu nhiên.
 
 ## Kiểm thử
 

@@ -24,12 +24,13 @@ except (ImportError, OSError):
     torch = None
 
 
-def fixture(root, max_events=64, full_metadata=False):
+def fixture(root, max_events=64, full_metadata=False, *,
+            field_budget=DEFAULT_FIELD_BUDGET, action_scope='all_event', with_prices=False):
     metadata, train, out = root / 'item_metadata.csv', root / 'train.csv', root / 'prepared'
     with metadata.open('w', encoding='utf-8', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(('item_id', 'properties'))
-        extra_properties = [f'Property {i:02d}' for i in range(13)] if full_metadata else []
+        extra_properties = [f'Property {i:02d}' for i in range(field_budget - 2)] if full_metadata else []
         writer.writerows([
             ('A', '1 Star|Satisfactory Rating|Car Park' + ''.join('|' + p for p in extra_properties)),
             ('B', '2 Star|From 2 Stars|Satisfactory Rating|Good Rating|Gym'),
@@ -39,7 +40,8 @@ def fixture(root, max_events=64, full_metadata=False):
         ])
     with train.open('w', encoding='utf-8', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(('user_id', 'session_id', 'timestamp', 'step', 'action_type', 'reference', 'impressions'))
+        header = ('user_id', 'session_id', 'timestamp', 'step', 'action_type', 'reference', 'impressions')
+        writer.writerow((*header, 'prices') if with_prices else header)
         for i in range(5):
             hotel = 'D' if i == 1 else 'A'
             events = [(action, hotel, '') for action in (
@@ -57,12 +59,13 @@ def fixture(root, max_events=64, full_metadata=False):
                 events = [('filter selection', p, '') for p in extra_properties] + events
             # Session names deliberately collide across users.
             for step, (action, reference, impressions) in enumerate(events, 1):
-                writer.writerow((f'u{i}', 'shared_session_id', i * 100 + step, step,
-                                 action, reference, impressions))
+                row = (f'u{i}', 'shared_session_id', i * 100 + step, step, action, reference, impressions)
+                prices = '10|20|30|40|50' if impressions else ''
+                writer.writerow((*row, prices) if with_prices else row)
     config = prepare(Namespace(
         train_csv=train, metadata_csv=metadata, output_dir=out, scratch_dir=root,
-        field_budget=DEFAULT_FIELD_BUDGET, max_neighbors=3, max_session_items=20, m=2, frequency=2,
-        seed=2023, max_rows=0, action_scope='all_event', max_session_events=max_events,
+        field_budget=field_budget, max_neighbors=3, max_session_items=20, m=2, frequency=2,
+        seed=2023, max_rows=0, action_scope=action_scope, max_session_events=max_events,
     ))
     return out, config
 

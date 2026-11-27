@@ -14,12 +14,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pickle
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -46,6 +49,14 @@ from trivago_price_features import (
 )
 
 TRAINER_RUNTIME_VERSION = "trivago_item_event_v1"
+EPOCH_TIMING_FIELDS = (
+    "train_time_seconds", "val_time_seconds", "epoch_time_seconds",
+    "cumulative_train_time_seconds", "cumulative_val_time_seconds", "val_retry_seconds",
+)
+TEST_TIMING_FIELDS = (
+    "test_time_seconds", "inference_total_seconds",
+    "inference_ms_per_sample", "inference_samples_per_second",
+)
 
 
 class TimeBudgetExceeded(Exception):
@@ -68,13 +79,155 @@ def fingerprint_file(path: Path) -> str:
 def atomic_save(payload: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    torch.save(payload, temporary)
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, path)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"Cannot save checkpoint {path}; check write access, free space "
+                           "and the storage file size limit") from exc
+
+
+def publish_best(latest_path: Path, best_path: Path) -> None:
+    temporary = best_path.with_name(best_path.name + ".tmp")
+    try:
+        shutil.copyfile(latest_path, temporary)
+        os.replace(temporary, best_path)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot publish best checkpoint {best_path}; check write access, "
+                           "free space and the storage file size limit") from exc
+
+
+def atomic_json(path: Path, value) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
     os.replace(temporary, path)
 
 
+def read_json(path: Path, expected_type):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except ValueError:
+        value = None
+    if not isinstance(value, expected_type):
+        print(f"Ignoring invalid JSON in {path}", flush=True)
+        return None
+    return value
+
+
 def write_status(output_dir: Path, **status) -> None:
-    (output_dir / "run_status.json").write_text(
-        json.dumps(status, indent=2), encoding="utf-8"
+    atomic_json(output_dir / "run_status.json", status)
+
+
+@contextmanager
+def lock_output(output_dir: Path):
+    """Keep the lock file in place; its OS lock ends when the writer exits."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / ".writer.lock").open("a+b") as lock:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot lock {output_dir}. Stop the other writer or use "
+                               "storage that supports exclusive file locks.") from exc
+        yield
+
+
+def load_checkpoint(path: Path) -> dict:
+    if not path.is_file():
+        raise ValueError(f"Missing checkpoint {path}; inspect the run directory before restarting")
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        raise ValueError(f"Cannot load checkpoint {path}; inspect or restore the saved file") from exc
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"Invalid checkpoint payload in {path}")
+    return checkpoint
+
+
+def numeric(value) -> bool:
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def nonnegative(value) -> bool:
+    return numeric(value) and value >= 0
+
+
+def timed_epochs(history, completed=None) -> list[dict]:
+    if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
+        raise ValueError("Invalid timed metric history")
+    rows = [row for row in history if "epoch" in row]
+    if (any(type(row["epoch"]) is not int or row["epoch"] != number
+            for number, row in enumerate(rows, 1))
+            or any("epoch" not in row and row.get("phase") != "resume_baseline" for row in history)
+            or (completed is not None and len(rows) != completed)):
+        raise ValueError("Timed metric history must contain consecutive completed epochs starting at 1")
+    train = val = 0.0
+    for row in rows:
+        if any(not nonnegative(row.get(key)) for key in EPOCH_TIMING_FIELDS):
+            raise ValueError(f"Missing or invalid timing in epoch {row['epoch']}")
+        train += row["train_time_seconds"]
+        val += row["val_time_seconds"]
+        if not all(math.isclose(row[key], expected) for key, expected in (
+                ("cumulative_train_time_seconds", train), ("cumulative_val_time_seconds", val),
+                ("epoch_time_seconds", row["train_time_seconds"] + row["val_time_seconds"]))):
+            raise ValueError(f"Inconsistent timing totals in epoch {row['epoch']}")
+    return rows
+
+
+def timing_from_checkpoint(checkpoint: dict, track_time: bool) -> dict:
+    state = checkpoint.get("timing_state")
+    if track_time and state is None:
+        raise ValueError("Checkpoint has no timing state. Use a fresh timed run directory.")
+    if not track_time and "timing_state" in checkpoint:
+        raise ValueError("Checkpoint was run with --track-time. Keep --track-time for this run.")
+    if track_time:
+        if not isinstance(state, dict) or any(
+                not nonnegative(state.get(key)) for key in ("train_time_seconds", "val_retry_seconds")):
+            raise ValueError("Checkpoint has invalid timing state")
+        epoch, offset = checkpoint.get("epoch"), checkpoint.get("next_offset")
+        if any(type(value) is not int or value < 0 for value in (epoch, offset)):
+            raise ValueError("Checkpoint has an invalid timed training cursor")
+        if not offset and (state["train_time_seconds"] or state["val_retry_seconds"]):
+            raise ValueError("Timed checkpoint has partial epoch time at an epoch boundary")
+        timed_epochs(checkpoint.get("metric_history"), epoch)
+        return state.copy()
+    return {}
+
+
+def timed_now(device: torch.device) -> float:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    return time.perf_counter()
+
+
+def valid_test_status(status: dict, track_time: bool) -> bool:
+    metrics = status.get("metrics")
+    return (
+        status.get("status") == "EVALUATED" and status.get("split") == "test"
+        and status.get("selection_metric") == "ndcg_at_5"
+        and status.get("training_finished") is True and isinstance(metrics, dict)
+        and all(nonnegative(metrics.get(key)) and metrics[key] <= 1
+                for key in ("ndcg_at_5", "recall_at_5"))
+        and type(metrics.get("examples")) is int and metrics["examples"] > 0
+        and (not track_time or (
+            all(nonnegative(metrics.get(key)) for key in TEST_TIMING_FIELDS)
+            and metrics["inference_total_seconds"] > 0
+            and metrics["test_time_seconds"] >= metrics["inference_total_seconds"]
+            and math.isclose(metrics["inference_ms_per_sample"],
+                             metrics["inference_total_seconds"] * 1000 / metrics["examples"])
+            and math.isclose(metrics["inference_samples_per_second"],
+                             metrics["examples"] / metrics["inference_total_seconds"])
+        ))
     )
 
 
@@ -162,17 +315,26 @@ def check_time(started: float, max_hours: float) -> None:
 
 @torch.no_grad()
 def evaluate(model: MLEUP, dataset: Data, candidates: list, batch_size: int,
-             started: float = 0, max_hours: float = 0, include_loss: bool = False) -> dict:
+             started: float = 0, max_hours: float = 0, include_loss: bool = False,
+             track_inference: bool = False) -> dict:
     if len(candidates) != len(dataset):
         raise ValueError("Candidate lists must align with the evaluation examples")
     model.eval()
+    if track_inference:
+        eval_device = next(model.parameters()).device
+        inference_seconds = 0.0
     count = 0
     recall5 = 0.0
     ndcg5 = 0.0
     ce_sum = metadata_sum = 0.0
     for offset in range(0, len(dataset), batch_size):
         indices = list(range(offset, min(offset + batch_size, len(dataset))))
-        targets, scores, metadata_loss = forward(model, batch_at(dataset, indices))
+        batch = batch_at(dataset, indices)
+        if track_inference:
+            forward_started = timed_now(eval_device)
+        targets, scores, metadata_loss = forward(model, batch)
+        if track_inference:
+            inference_seconds += timed_now(eval_device) - forward_started
         # Transfer only impression scores, once per batch. Ranking scalar-by-
         # scalar on CUDA would synchronize the GPU three times per example.
         if model.action_mode == "event_graph_candidate":
@@ -230,6 +392,12 @@ def evaluate(model: MLEUP, dataset: Data, candidates: list, batch_size: int,
     if include_loss:
         result.update(ce_loss=ce_sum / count, metadata_loss=metadata_sum / count,
                       total_loss=(ce_sum + metadata_sum) / count)
+    if track_inference:
+        result.update(
+            inference_total_seconds=inference_seconds,
+            inference_ms_per_sample=inference_seconds * 1000 / count,
+            inference_samples_per_second=count / inference_seconds if inference_seconds > 0 else None,
+        )
     return result
 
 
@@ -268,6 +436,8 @@ def main() -> None:
                         help="Minimum relative change in BOTH CE losses to count as divergence (0.001 = 0.1%%)")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--eval-only", choices=("val", "test"))
+    parser.add_argument("--track-time", action="store_true",
+                        help="Track training, validation and inference time")
     parser.add_argument("--max-batches", type=int, default=0,
                         help="Smoke test only; 0 means full split")
     args = parser.parse_args()
@@ -283,6 +453,14 @@ def main() -> None:
             or not 0 < args.min_lr <= args.lr or not 0 < args.lr_factor < 1
             or args.min_delta < 0 or args.loss_min_delta < 0 or args.lr_patience < 0):
         parser.error('Require finite values: 0 < min-lr <= lr, 0 < lr-factor < 1, min-delta/loss-min-delta >= 0, lr-patience >= 0')
+    if args.eval_only == "val":
+        run(args)
+    else:
+        with lock_output(args.output_dir):
+            run(args)
+
+
+def run(args) -> None:
     training_policy = checkpoint_training_policy(args)
     config = load_pickle(args.prepared_dir / "config.pkl")
     if config.get("metadata_mode") != "train_filter_top_k":
@@ -406,8 +584,53 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     latest_path = args.output_dir / "result_latest.pth"
     best_path = args.output_dir / "result_best.pth"
+    status = read_json(args.output_dir / "run_status.json", dict) or {}
+    history_path = args.output_dir / "metric_history.json"
+    if not (args.resume or args.eval_only) and (
+            latest_path.exists() or best_path.exists() or history_path.exists()
+            or status.get("training_finished") or status.get("status") in
+            ("COMPLETE", "EARLY_STOPPED", "EVALUATED", "PAUSED", "PAUSED_DURING_VAL", "SMOKE_STOP")):
+        raise ValueError(f"Existing run state in {args.output_dir}; use --resume or a fresh directory")
+
+    def load_checked(path):
+        checkpoint = load_checkpoint(path)
+        validate_checkpoint(checkpoint, signature, model_arguments)
+        return checkpoint
+
+    def check_best(checkpoint, repair=False):
+        expected_epoch = checkpoint.get("best_epoch")
+        expected_offset = checkpoint.get("best_offset", 0)
+        expected_ndcg = best_validation_ndcg(checkpoint)
+        expected_id = checkpoint.get("best_checkpoint_id")
+        if expected_epoch is None:
+            if best_path.exists() or checkpoint.get("training_finished"):
+                raise ValueError(f"Latest checkpoint does not identify a best checkpoint in {args.output_dir}")
+            return
+        if args.track_time and not expected_id:
+            raise ValueError(f"Latest checkpoint lacks the best checkpoint ID in {args.output_dir}")
+        best_cursor = (expected_epoch - int(expected_offset != 0), expected_offset)
+        can_publish = (checkpoint["epoch"], checkpoint["next_offset"]) == best_cursor
+        if best_path.exists():
+            best = load_checked(best_path)
+            if args.track_time and best.get("training_policy") != training_policy:
+                raise ValueError("Best checkpoint training policy differs from this run")
+            timing_from_checkpoint(best, args.track_time)
+            if (best_validation_ndcg(best) == expected_ndcg and best.get("best_epoch") == expected_epoch
+                    and (best["epoch"], best["next_offset"]) == best_cursor
+                    and best.get("best_checkpoint_id") == expected_id):
+                return best
+            can_publish = can_publish and best["epoch"] < best_cursor[0]
+            del best
+        if repair and can_publish:
+            publish_best(latest_path, best_path)
+            print(f"Recovered {best_path} from the selected epoch in {latest_path}", flush=True)
+            return
+        raise ValueError(f"Best checkpoint is missing or disagrees with {latest_path}; "
+                         "inspect the run before testing or restarting")
+
     epoch, next_offset, global_step, best_ndcg = 0, 0, 0, -1.0
     best_epoch, best_offset = None, 0
+    best_checkpoint_id = None
     metric_history = []
     needs_metric_baseline = False
     training_finished = False
@@ -415,19 +638,50 @@ def main() -> None:
     early_stopping = new_early_stopping(args.patience, args.loss_patience,
                                         args.min_delta, args.loss_min_delta)
     train_epoch_totals = dict(ce_sum=0.0, metadata_sum=0.0, examples=0)
+    timing_state = dict(train_time_seconds=0.0, val_retry_seconds=0.0)
+    timing_environment = []
+    if args.track_time:
+        environment = dict(
+            device=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
+            pytorch=str(torch.__version__), cuda=torch.version.cuda, batch_size=args.batch_size,
+            seed=config["seed"], databricks_runtime=os.environ.get("DATABRICKS_RUNTIME_VERSION"),
+        )
+        print(f"Timing environment: {json.dumps(environment)}", flush=True)
+
+    final_run = None
     if args.eval_only == 'test':
-        status_path = args.output_dir / 'run_status.json'
-        status = json.loads(status_path.read_text(encoding='utf-8')) if status_path.is_file() else {}
-        if status.get('status') not in ('COMPLETE', 'EARLY_STOPPED', 'EVALUATED'):
-            raise ValueError('Test metrics are final-only; finish training first')
-        if not best_path.is_file():
-            raise ValueError('No best NDCG@5 checkpoint available')
+        if latest_path.exists():
+            latest = load_checked(latest_path)
+            timing_from_checkpoint(latest, args.track_time)
+            if latest.get("training_finished") is not True or latest["next_offset"] != 0:
+                raise ValueError("Test metrics are final-only; finish training first")
+            if args.track_time and latest.get("training_policy") != training_policy:
+                raise ValueError("Latest checkpoint training policy differs from this run")
+            final_run = {key: latest.get(key) for key in (
+                "epoch", "global_step", "early_stopping", "metric_history", "timing_environment",
+            )}
+            # Release latest tensors before opening the best checkpoint.
+            latest.pop("model", None)
+            latest.pop("optimizer", None)
+            checkpoint = check_best(latest)
+            del latest
+        elif args.track_time or status.get('status') not in ('COMPLETE', 'EARLY_STOPPED', 'EVALUATED'):
+            raise ValueError('Test metrics are final-only; finish training and retain the latest checkpoint')
     if args.resume or args.eval_only:
         path = best_path if args.eval_only and best_path.is_file() else latest_path
+        if args.eval_only == "test":
+            path = best_path
         # Keep the serialized payload off the GPU. load_state_dict copies model
         # weights; Adam moves only its required state to the parameter device.
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-        validate_checkpoint(checkpoint, signature, model_arguments)
+        if final_run is None:
+            checkpoint = load_checked(path)
+        restored_timing = timing_from_checkpoint(checkpoint, args.track_time)
+        if args.track_time:
+            timing_state = restored_timing
+            timing_environment = (final_run or checkpoint).get("timing_environment") or []
+            if timing_environment and timing_environment[-1] != environment:
+                print("Timing environment changed since the previous session; "
+                      "compare timed runs with care.", flush=True)
         saved_policy = checkpoint.get('training_policy')
         saved_stopping = checkpoint.get('early_stopping', {})
         if not args.eval_only:
@@ -464,6 +718,7 @@ def main() -> None:
         if checkpoint.get('selection_metric') == 'ndcg_at_5':
             best_epoch = checkpoint.get('best_epoch')
             best_offset = checkpoint.get('best_offset', 0)
+            best_checkpoint_id = checkpoint.get('best_checkpoint_id')
             metric_history = checkpoint.get('metric_history', [])
             training_finished = checkpoint.get('training_finished', False)
         if saved_stopping.get('version') == EARLY_STOPPING_VERSION:
@@ -496,7 +751,13 @@ def main() -> None:
             early_stopping = new_early_stopping(args.patience, args.loss_patience,
                                                 args.min_delta, args.loss_min_delta)
         print(f"Loaded {path}; epoch={epoch}, offset={next_offset:,}", flush=True)
+        if args.resume and not args.eval_only and not needs_metric_baseline:
+            check_best(checkpoint, repair=True)
         del checkpoint
+
+    if args.track_time and not args.eval_only and not training_finished and (
+            not timing_environment or timing_environment[-1] != environment):
+        timing_environment = [*timing_environment, environment]
 
     def save(path: Path, save_epoch: int, save_offset: int) -> None:
         atomic_save({
@@ -513,13 +774,14 @@ def main() -> None:
             "sample_order": args.sample_order,
             "metadata_projection": args.metadata_projection,
             "model_arguments": model_arguments,
+            **({"timing_state": timing_state.copy(), "timing_environment": timing_environment,
+                "best_checkpoint_id": best_checkpoint_id} if args.track_time else {}),
             "cpu_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state_all() if device.type == "cuda" else None,
         }, path)
 
     def write_metric_history() -> None:
-        (args.output_dir / 'metric_history.json').write_text(
-            json.dumps(metric_history, indent=2), encoding='utf-8')
+        atomic_json(history_path, metric_history)
 
     if migrated_policy and not needs_metric_baseline:
         save(latest_path, epoch, next_offset)
@@ -539,20 +801,46 @@ def main() -> None:
     if args.eval_only:
         evaluation = make_data(args.prepared_dir, args.eval_only, config, options)
         candidates = load_candidates(args.prepared_dir, args.eval_only)
-        metrics = evaluate(model, evaluation, candidates, args.batch_size)
+        if args.track_time:
+            evaluation_started = timed_now(device)
+            metrics = evaluate(model, evaluation, candidates, args.batch_size, track_inference=True)
+            metrics[f"{args.eval_only}_time_seconds"] = timed_now(device) - evaluation_started
+        else:
+            metrics = evaluate(model, evaluation, candidates, args.batch_size)
         print(json.dumps({args.eval_only: metrics}, indent=2), flush=True)
         if args.eval_only == 'test':
+            if final_run is not None:
+                metric_history = final_run["metric_history"]
+                if read_json(history_path, list) != metric_history:
+                    write_metric_history()
             write_status(args.output_dir, status="EVALUATED", split=args.eval_only,
                          metrics=metrics, evaluated_checkpoint=str(path), selection_metric='ndcg_at_5',
                          best_epoch=best_epoch, best_val_ndcg_at_5=best_ndcg, training_finished=True,
-                         early_stopping=status.get('early_stopping'))
+                         early_stopping=(final_run or status).get('early_stopping'),
+                         **(dict(epochs=final_run["epoch"], global_step=final_run["global_step"],
+                                 best_checkpoint_id=best_checkpoint_id,
+                                 timing_environment=timing_environment, test_environment=environment)
+                            if args.track_time else {}))
         return
 
-    if training_finished:
+    if args.resume and (metric_history or history_path.exists()) and (
+            read_json(history_path, list) != metric_history):
         write_metric_history()
-        write_status(args.output_dir, status='EARLY_STOPPED' if early_stopping['stopped'] else 'COMPLETE',
-                     epochs=epoch, global_step=global_step, early_stopping=early_stopping,
-                     best_val_ndcg_at_5=best_ndcg, best_epoch=best_epoch, training_finished=True)
+    if training_finished:
+        evaluated = (valid_test_status(status, args.track_time)
+                     and status.get("best_epoch") == best_epoch
+                     and status.get("best_val_ndcg_at_5") == best_ndcg
+                     and status.get("evaluated_checkpoint") == str(best_path))
+        if evaluated and args.track_time:
+            evaluated = (status.get("best_checkpoint_id") == best_checkpoint_id
+                         and status.get("epochs") == epoch and status.get("global_step") == global_step)
+        elif evaluated:
+            status_mtime = (args.output_dir / "run_status.json").stat().st_mtime_ns
+            evaluated = status_mtime >= max(best_path.stat().st_mtime_ns, latest_path.stat().st_mtime_ns)
+        if not evaluated:
+            write_status(args.output_dir, status='EARLY_STOPPED' if early_stopping['stopped'] else 'COMPLETE',
+                         epochs=epoch, global_step=global_step, early_stopping=early_stopping,
+                         best_val_ndcg_at_5=best_ndcg, best_epoch=best_epoch, training_finished=True)
         print('Training already complete; no more updates. Run --eval-only test.', flush=True)
         return
 
@@ -580,8 +868,8 @@ def main() -> None:
         metric_history.append(record)
         print(json.dumps(record), flush=True)
         training_finished = epoch >= args.epochs and next_offset == 0
-        save(best_path, epoch, next_offset)
         save(latest_path, epoch, next_offset)
+        publish_best(latest_path, best_path)
         write_metric_history()
     for current_epoch in range(epoch, args.epochs):
         generator = torch.Generator().manual_seed(config["seed"] + current_epoch)
@@ -592,6 +880,8 @@ def main() -> None:
         print(f"Epoch {current_epoch + 1}/{args.epochs}, "
               f"examples={len(train):,}, start={start_offset:,}, lr={epoch_lr:g}", flush=True)
         for offset in range(start_offset, len(train), args.batch_size):
+            if args.track_time:
+                batch_started = timed_now(device)
             indices = permutation[offset:offset + args.batch_size]
             optimizer.zero_grad(set_to_none=True)
             targets, scores, metadata_loss = forward(model, batch_at(train, indices))
@@ -607,6 +897,8 @@ def main() -> None:
             train_epoch_totals['ce_sum'] += float(ce_loss.detach()) * len(indices)
             train_epoch_totals['metadata_sum'] += float(torch.as_tensor(metadata_loss).detach()) * len(indices)
             train_epoch_totals['examples'] += len(indices)
+            if args.track_time:
+                timing_state["train_time_seconds"] += timed_now(device) - batch_started
             global_step += 1
             next_offset = min(offset + len(indices), len(train))
             if global_step % 100 == 0:
@@ -630,13 +922,20 @@ def main() -> None:
                 return
         save(latest_path, current_epoch, len(train))
         print("Validation...", flush=True)
+        if args.track_time:
+            val_started = timed_now(device)
         try:
             metrics = evaluate(model, validation, val_candidates, args.batch_size, started,
                                args.max_hours, include_loss=True)
         except TimeBudgetExceeded:
+            if args.track_time:
+                timing_state["val_retry_seconds"] += timed_now(device) - val_started
+                save(latest_path, current_epoch, len(train))
             write_status(args.output_dir, status="PAUSED_DURING_VAL",
                          epoch=current_epoch, global_step=global_step)
             return
+        if args.track_time:
+            val_time = timed_now(device) - val_started
         monitored_count = train_epoch_totals['examples']
         train_losses = dict(
             ce_loss=train_epoch_totals['ce_sum'] / monitored_count if monitored_count else None,
@@ -655,16 +954,31 @@ def main() -> None:
                   "learning_rate": epoch_lr, "next_learning_rate": next_lr,
                   "lr_reduced": next_lr < epoch_lr,
                   "early_stopping": dict(early_stopping)}
+        if args.track_time:
+            train_time = timing_state["train_time_seconds"]
+            completed = [row for row in metric_history if "epoch" in row]
+            record.update(
+                train_time_seconds=train_time, val_time_seconds=val_time,
+                epoch_time_seconds=train_time + val_time,
+                cumulative_train_time_seconds=sum(row["train_time_seconds"] for row in completed) + train_time,
+                cumulative_val_time_seconds=sum(row["val_time_seconds"] for row in completed) + val_time,
+                val_retry_seconds=timing_state["val_retry_seconds"],
+            )
         metric_history.append(record)
         print(json.dumps(record), flush=True)
         if improved:
             best_ndcg = metrics["ndcg_at_5"]
             best_epoch, best_offset = current_epoch + 1, 0
+            if args.track_time:
+                best_checkpoint_id = uuid4().hex
         training_finished = stopped or current_epoch + 1 == args.epochs
         train_epoch_totals = dict(ce_sum=0.0, metadata_sum=0.0, examples=0)
-        if improved:
-            save(best_path, current_epoch + 1, 0)
+        if args.track_time:
+            timing_state = dict(train_time_seconds=0.0, val_retry_seconds=0.0)
+        # Commit the cursor first, so an interrupted best publication can be replayed byte-for-byte.
         save(latest_path, current_epoch + 1, 0)
+        if improved:
+            publish_best(latest_path, best_path)
         write_metric_history()
         next_offset = 0
         if stopped:
